@@ -5,11 +5,11 @@ class countryWiseNumberPlate:
         self.countryNumberPlateFormats = {
             "IN": {
                 "regex_list": [
-                    r"^[A-Z]{2}\d{1}[A-Z]\d{4}$",         # DL1A2345 (8)
-                    r"^[A-Z]{2}\d{2}[A-Z]\d{4}$",         # DL14A2345 (9)
-                    r"^[A-Z]{2}\d{1}[A-Z]{2}\d{4}$",      # DL7AC2345 (9)
-                    r"^[A-Z]{2}\d{2}[A-Z]{2}\d{4}$",      # DL74AC2345 (10)
-                    r"^[A-Z]{2}[0-9][A-Z0-9][A-Z]{2}\d{4}$", # MH1CAB1234 (10 fallback)
+                    r"^[A-Z]{2}\d{1}[A-Z]\d{4}$",         # LL D L DDDD (8)
+                    r"^[A-Z]{2}\d{2}[A-Z]\d{4}$",         # LL DD L DDDD (9)
+                    r"^[A-Z]{2}\d{1}[A-Z]{2}\d{4}$",      # LL D LL DDDD (9)
+                    r"^[A-Z]{2}\d{2}[A-Z]{2}\d{4}$",      # LL DD LL DDDD (10)
+                    r"^[A-Z]{2}[0-9][A-Z0-9][A-Z]{2}\d{4}$", # fallback
                     r"^\d{2}\s*[- ]?\sBH\s[- ]?\s*\d{4}\s*[- ]?\s*[A-HJ-NP-Z]{1,2}$"
                 ],
 
@@ -68,6 +68,8 @@ class countryWiseNumberPlate:
                 state = text[:2]
                 if state in state_codes:
                     return state
+                if state == "OL":
+                     return "DL"
                 if text[0] in map1:
                     return map1[text[0]]
                 if text[1] in map2:
@@ -79,9 +81,9 @@ class countryWiseNumberPlate:
 
     def correctAlphanumbericNumberPlate(self, text, check="alpha"):
         try:
-            alphaMap = {'0':'O','1':'I','2':'Z','5':'S','6':'G','8':'B'}
-            numericMap = {'O':'0','D':'0','Q':'0','I':'1','L':'1','Z':'2','S':'5','G':'6','B':'8'}
-            specialMap = {'$':'S','@':'A'}
+            alphaMap = {'0':'O','1':'I','2':'Z','3':'E','5':'S','6':'G','7':'T','8':'B'}
+            numericMap = {'O':'0','D':'0','Q':'0','I':'1','L':'1','Z':'2','S':'5','E':'3','G':'6','T':'7','Y':'7','B':'8'}
+            specialMap = {'$':'S','@':'A','!':'1','|':'1'}
 
             corrected = ""
             for ch in text:
@@ -98,6 +100,65 @@ class countryWiseNumberPlate:
             logger.error(f"Error in correctAlphanumbericNumberPlate: {e}")
             return text
 
+    def stripAndUpper(self, text):
+        # Uppercase + remove non-alphanumerics
+        text = text.upper()
+        text = re.sub(r'[^A-Z0-9]', '', text)
+        return text
+
+    def alignToStateCode(self, text):
+        """
+        If the first two chars are not a state code and the string starts
+        with extra letters (e.g., IND...), shift to the first valid state code.
+        We do NOT convert letters to digits before finding state code.
+        """
+        data = self.countryNumberPlateFormats[self.country]
+        state_codes = set(data["state_codes"])
+        size = len(text)
+        for i in range(0, max(0, size - 1)):
+            if text[i:i+2] in state_codes:
+                return text[i:]
+        return text
+
+    def applyGenericRules(self, text):
+        # 1) uppercase + strip junk
+        text = self.stripAndUpper(text)
+
+        # 2) ignore leading IND if present
+        if text.startswith("IND"):
+            text = text[3:]
+
+        # 3) convert special chars early
+        text = self.correctAlphanumbericNumberPlate(text, check="special")
+
+        # 4) align to state code if needed (before alpha->digit conversion)
+        text = self.alignToStateCode(text)
+
+        # 5) if too short to apply rules, return as-is
+        if len(text) < 6:
+            return text
+
+        # 6) enforce letter/digit positions with corrections
+        # positions 0-1: letters (state code), position 2: digit
+        if len(text) >= 3:
+            # ensure first two letters look like letters (digit->alpha)
+            text = self.correctAlphanumbericNumberPlate(text[:2], check="alpha") + text[2:]
+            # ensure position 2 numeric (alpha->digit)
+            text = text[:2] + self.correctAlphanumbericNumberPlate(text[2], check="numeric") + text[3:]
+
+        # last 4 digits
+        if len(text) >= 4:
+            last4 = self.correctAlphanumbericNumberPlate(text[-4:], check="numeric")
+            text = text[:-4] + last4
+
+        # position -5 must be letter
+        if len(text) >= 5:
+            p = text[-5]
+            p = self.correctAlphanumbericNumberPlate(p, check="alpha")
+            text = text[:-5] + p + text[-4:]
+
+        return text
+
     def checkBharatNumberPate(self, text):
         try:
             allPossibilities = []
@@ -109,9 +170,7 @@ class countryWiseNumberPlate:
             if size > 8:
                 for i, ch in enumerate(text):
                     if ch == 'H' and i > 2 and (size - 4) >= 5:
-                        # attempt to insert B for BH pattern
                         candidate = text[:i-1] + 'B' + text[i:]
-                        # try to correct slices safely
                         try:
                             yearTxt = self.correctAlphanumbericNumberPlate(candidate[i-3:i-1], check="numeric")
                             NumText = self.correctAlphanumbericNumberPlate(candidate[i+1:i+5], check="numeric")
@@ -145,21 +204,26 @@ class countryWiseNumberPlate:
                     state = text[:2]
                     if state not in state_codes:
                         return 0
-                    txt = text[-4:]
-                    if not txt.isdigit():
+                    if not text[-4:].isdigit():
                         return 0
                     if size == 8:
+                        # LLDLDDDD
                         if not (text[2].isdigit() and text[3].isalpha()):
                             return 0
                     if size == 9:
-                        # either pattern: digit digit alpha OR digit alpha alpha
-                        if not ((text[2:4].isdigit() and text[4].isalpha()) or (text[2].isdigit() and text[3:5].isalpha())):
+                        # LLD(DL or LL)DDDD
+                        if not ((text[2].isdigit() and text[3].isdigit() and text[4].isalpha()) or
+                                (text[2].isdigit() and text[3].isalpha() and text[4].isalpha())):
                             return 0
                     if size == 10:
-                        # simple conservative checks
-                        if not (text[2:4].isdigit() or (text[2].isdigit() and text[3].isalpha())):
-                            return 0
-                        if not text[4:6].isalpha():
+                        # LLDDLLDDDD (DL exception: index 3 can be letter)
+                        if state == "DL":
+                            if not (text[2].isdigit() and (text[3].isdigit() or text[3].isalpha())):
+                                return 0
+                        else:
+                            if not (text[2].isdigit() and text[3].isdigit()):
+                                return 0
+                        if not (text[4:6].isalpha()):
                             return 0
                     return 1
                 except Exception as e:
@@ -170,47 +234,34 @@ class countryWiseNumberPlate:
             if not text:
                 return (text, 0)
 
-            text = self.correctAlphanumbericNumberPlate(text, check="special")
+            # apply generic normalization + rules
+            text = self.applyGenericRules(text)
             size = len(text)
 
             if size == 8:
-                checkText = self.correctAlphanumbericNumberPlate(text[0:2], check="alpha")
-                checkText = f"{checkText}{text[2:]}"
-                if self.checkRegex(patterns[0], checkText):
-                    finalPlate = formatPlate(checkText)
+                if self.checkRegex(patterns[0], text):
+                    finalPlate = formatPlate(text)
                     check = checkNumberPlateCorrectness(finalPlate, size)
                     return (finalPlate, check)
 
             if size == 9:
-                if text[-4:].isdigit():
-                    checkText = self.correctAlphanumbericNumberPlate(text[0:3], check="alpha")
-                    checkText = f"{checkText}{text[3:]}"
-                else:
-                    checkText = self.correctAlphanumbericNumberPlate(text[0:2], check="alpha")
-                    checkText = f"{checkText}{text[2:]}"
-                if self.checkRegex(patterns[1], checkText) or self.checkRegex(patterns[2], checkText):
-                    finalPlate = formatPlate(checkText)
+                if self.checkRegex(patterns[1], text) or self.checkRegex(patterns[2], text):
+                    finalPlate = formatPlate(text)
                     check = checkNumberPlateCorrectness(finalPlate, size)
                     return (finalPlate, check)
 
             if size == 10:
-                checkText = self.correctAlphanumbericNumberPlate(text[0:2], check="alpha")
-                checkText = f"{checkText}{text[2:]}"
-                if self.checkRegex(patterns[3], checkText) or self.checkRegex(patterns[4], checkText):
-                    finalPlate = formatPlate(checkText)
+                if self.checkRegex(patterns[3], text) or self.checkRegex(patterns[4], text):
+                    finalPlate = formatPlate(text)
                     check = checkNumberPlateCorrectness(finalPlate, size)
                     return (finalPlate, check)
 
+            # only Bharat fallback now (no substring matching)
             if size > 8:
-                if self.combined_pattern_regex:
-                    found, checkText = self.findNumberPlateFormat(self.combined_pattern_regex, text)
-                    if found:
-                        finalPlate = formatPlate(checkText)
-                        check = checkNumberPlateCorrectness(finalPlate, len(checkText))
-                        return (finalPlate, check)
                 bharatCheck, bharatText = self.checkBharatNumberPate(text)
                 if bharatCheck:
                     return (bharatText, 1)
+
             return (text, 0)
 
         except Exception as e:
